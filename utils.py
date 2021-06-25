@@ -3,7 +3,7 @@ import torch.nn.functional as F
 import torchvision.transforms as transforms
 from datasets.coco_ds import CurriculumCocoCaptions
 from torch.utils.data import DataLoader
-from tf_learning.common.vision.datasets.officecaltech import OfficeCaltech
+from datasets.officecaltech import OfficeCaltech
 import os
 
 SENTENCES = ["A photo of a back pack.", "A photo of a bike.", "A photo of a calculator", "A photo of an headphone.",
