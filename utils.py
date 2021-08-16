@@ -1,9 +1,9 @@
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as transforms
-from datasets.coco_ds import CurriculumCocoCaptions
+from data.datasets import CurriculumCocoCaptions
 from torch.utils.data import DataLoader
-from datasets.officecaltech import OfficeCaltech
+from data.datasets import OfficeCaltech
 import os
 import torchvision
 
