@@ -20,7 +20,8 @@ from train import train, evaluate
 from data.data import get_data
 from training.params import parse_args
 from training.logger import setup_primary_logging, setup_worker_logging
-from training.scheduler import CosineScheduler
+from training.scheduler import cosine_lr
+from transformers import CLIPModel, CLIPConfig, CLIPProcessor
 
 
 # Used by https://github.com/openai/CLIP/issues/83 but not below.
@@ -59,27 +60,28 @@ def main_worker(gpu, log_queue, args):
     assert os.path.exists(model_config_file)
     with open(model_config_file, 'r') as f:
         model_info = json.load(f)
-    model = CLIP(**model_info)
-    convert_weights(model)
-    preprocess_train = _transform(model.visual.input_resolution, is_train=True)
-    preprocess_val = _transform(model.visual.input_resolution, is_train=False)
+    model = CLIPModel(CLIPConfig())
+    model_empty = CLIP(**model_info)
+#    convert_weights(model)
+    preprocess_train = _transform(model_empty.visual.input_resolution, is_train=True)
+    preprocess_val = _transform(model_empty.visual.input_resolution, is_train=False)
 
-    if args.precision == "amp" or args.precision == "fp32" or args.gpu is None:
-        convert_models_to_fp32(model)
+#    if args.precision == "amp" or args.precision == "fp32" or args.gpu is None:
+#        convert_models_to_fp32(model)
 
     if not torch.cuda.is_available():
         model.float()
         logging.warning("This will run on CPU.")
     else:
         model.cuda(args.gpu)
-        if args.precision == "fp16":
-            convert_weights(model)
+#        if args.precision == "fp16":
+#            convert_weights(model)
 
         if args.world_size > 1:
             model = torch.nn.DataParallel(model, device_ids=args.multigpu)
 
-        if args.precision == "fp16":
-            convert_weights(model)
+#        if args.precision == "fp16":
+#            convert_weights(model)
 
     data = get_data(args, (preprocess_train, preprocess_val))
 
@@ -101,7 +103,7 @@ def main_worker(gpu, log_queue, args):
             ],
             lr=args.lr, betas=(args.beta1, args.beta2), eps=args.eps, )
         total_steps = data["train"].num_batches * args.epochs
-        scheduler = CosineScheduler(args.lr, args.warmup, total_steps)
+        scheduler = cosine_lr(optimizer, args.lr, args.warmup, total_steps)
 
     scaler = GradScaler() if args.precision == "amp" else None
 
@@ -153,8 +155,8 @@ def main_worker(gpu, log_queue, args):
     if args.train_data is None:
         evaluate(model, data, start_epoch, args, writer)
         return
-    elif start_epoch == 0 and args.val_data is not None:
-        evaluate(model, data, 0, args, writer)
+#    elif start_epoch == 0 and args.val_data is not None:
+#        evaluate(model, data, 0, args, writer)
 
     for epoch in range(start_epoch, args.epochs):
         if (args.gpu == min(args.multigpu)):
@@ -181,7 +183,6 @@ def main_worker(gpu, log_queue, args):
 
     if args.wandb and (args.gpu == 0 or (not args.distributed)):
         wandb.finish()
-
 
 def main():
     args = parse_args()

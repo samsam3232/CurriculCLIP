@@ -2,6 +2,10 @@ from tqdm import tqdm
 import torch
 import logging
 import model.clip as clip
+from transformers import CLIPProcessor
+
+PROCESSOR = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+
 
 imagenet_classnames = ["tench", "goldfish", "great white shark", "tiger shark", "hammerhead shark", "electric ray",
                         "stingray", "rooster", "hen", "ostrich", "brambling", "goldfinch", "house finch", "junco",
@@ -210,9 +214,9 @@ def zs_evaluate(model, zeroshot_weights, loader, args):
 
             # predict
             if args.world_size > 1:
-                image_features = model(images, None)
+                image_features = model._modules['module'].get_image_features(images)
             else:
-                image_features = model.encode_image(images)
+                image_features = model._modules['module'].get_image_features(images)
             image_features /= image_features.norm(dim=-1, keepdim=True)
             logits = 100. * image_features @ zeroshot_weights
 
@@ -232,11 +236,13 @@ def classes_weights(model, classnames, templates, args):
         zeroshot_weights = []
         for classname in tqdm(classnames):
             texts = [template(classname) for template in templates] #format with class
-            texts = clip.tokenize(texts).to(args.gpu) #tokenize
+            texts = PROCESSOR.tokenizer(texts, return_tensors='pt', padding='max_length',  max_length=30)
+            texts['input_ids'] = texts['input_ids'].squeeze(1).cuda(args.gpu, non_blocking=True)
+            texts['attention_mask'] = texts['attention_mask'].squeeze(1).cuda(args.gpu, non_blocking=True)
             if args.world_size > 1:
-                class_embeddings = model(None, texts)
+                class_embeddings = model._modules['module'].get_text_features(**texts)
             else:
-                class_embeddings = model.encode_text(texts)
+                class_embeddings = model._modules['module'].get_text_features(**texts)
             class_embeddings /= class_embeddings.norm(dim=-1, keepdim=True)
             class_embedding = class_embeddings.mean(dim=0)
             class_embedding /= class_embedding.norm()

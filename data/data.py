@@ -6,9 +6,10 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset, DataLoader
 import torchvision.datasets as datasets
-
+from transformers import CLIPProcessor
 from model.clip import tokenize
 
+PROCESSOR = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
 class ConceptualCaption(Dataset):
     def __init__(self, input_filename, transforms, ims_root, sorted=False):
@@ -27,18 +28,18 @@ class ConceptualCaption(Dataset):
 
     def sort_csv(self, df):
         df['word_count'] = df['title'].str.replace(' \.', '.').str.split(' ').str.len()
-        df = df.sort_values('word_count', ascending=False)
+        df = df.sort_values('word_count', ascending=True)
         return df
 
     def __len__(self):
-        return len(self.captions)
+        return min(500000, len(self.captions))
 
     def __getitem__(self, idx):
         not_found = True
         while not_found:
             try:
                 images = self.transforms(Image.open(os.path.join(self.ims_root, str(self.images[idx]))))
-                texts = tokenize([str(self.captions[idx])])[0]
+                texts = preprocess_txt([str(self.captions[idx])])
                 not_found = False
             except:
                 idx += 1
@@ -46,7 +47,7 @@ class ConceptualCaption(Dataset):
 
 
 def preprocess_txt(text):
-    return tokenize([str(text)])[0]
+    return PROCESSOR.tokenizer(text, return_tensors='pt', padding='max_length',  max_length=60)
 
 
 def get_imagenet_loader(args, preprocess_fns):

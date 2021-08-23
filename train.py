@@ -8,6 +8,7 @@ import time
 from training.zero_shot_imagenet_util import zero_shot_evaluation
 from training.utils import get_predictions_metrics, get_loss
 import torch.nn as nn
+import numpy as np
 
 
 
@@ -29,18 +30,19 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
     end = time.time()
     for i, batch in enumerate(loader):
         step = num_batches_per_epoch * epoch + i
-        optimizer, lr = scheduler.update_lr(optimizer, step)
-
+        scheduler(step)
         optimizer.zero_grad()
 
         images, texts = batch
         if args.gpu is not None:
             images = images.cuda(args.gpu, non_blocking=True)
-            texts = texts.cuda(args.gpu, non_blocking=True)
+            texts['input_ids'] = texts['input_ids'].squeeze(1).cuda(args.gpu, non_blocking=True)
+            texts['attention_mask'] = texts['attention_mask'].squeeze(1).cuda(args.gpu, non_blocking=True)
 
+        inputs = {'input_ids': texts['input_ids'], 'attention_mask': texts['attention_mask'], 'pixel_values': images}
         data_time = time.time() - end
 
-        m = model.module
+#        m = model.module
 
         # with automatic mixed precision.
         if args.precision == "amp":
@@ -51,22 +53,22 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
             scaler.update()
 
         else:
-            total_loss = get_loss(model, images, texts, loss_img, loss_txt, args)
+            total_loss = get_loss(model, inputs, loss_img, loss_txt, args)
             total_loss.backward()
             optimizer.step()
 
-        m.logit_scale.data = torch.clamp(m.logit_scale.data, 0, 4.6052)
+#        m.logit_scale.data = torch.clamp(m.logit_scale.data, 0, 4.6052)
         batch_time = time.time() - end
         end = time.time()
 
         if (i % 100) == 0:
-            num_samples = i * len(images) * args.world_size
+            num_samples = i * len(images)
             samples_per_epoch = loader.num_samples
             percent_complete = 100.0 * i / num_batches_per_epoch
             logging.info(
                 f"Train Epoch: {epoch} [{num_samples}/{samples_per_epoch} ({percent_complete:.0f}%)]\t"
                 f"Loss: {total_loss.item():.6f}\tData (t) {data_time:.3f}\tBatch (t) {batch_time:.3f}"
-                f"\tLR: {optimizer.param_groups[0]['lr']:5f}\tlogit_scale {m.logit_scale.data:.3f}"
+                f"\tLR: {optimizer.param_groups[0]['lr']:5f}"
             )
             # save train loss / etc.
 
@@ -75,7 +77,7 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
                 "loss": total_loss.item(),
                 "data_time": data_time,
                 "batch_time": batch_time,
-                "scale": m.logit_scale.data.item(),
+#                "scale": m.logit_scale.data.item(),
                 "lr": optimizer.param_groups[0]["lr"]
             }
 
@@ -86,7 +88,7 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
                 if args.wandb:
                     wandb.log({name: val, 'step': timestep})
 
-        if (i % 1000) == 999:
+        if (i % 250) == 249:
             logging.info(f'Epoch {epoch}, step {i} evaluation:')
             evaluate(model, data, epoch, args, tb_writer)
 
@@ -113,14 +115,17 @@ def evaluate(model, data, epoch, args, tb_writer=None):
     with torch.no_grad():
         for ims, texts in loader:
             if args.gpu is not None:
-                ims, texts = ims.cuda(args.gpu, non_blocking=True), texts.cuda(args.gpu, non_blocking=True)
+                ims = ims.cuda(args.gpu, non_blocking=True)
+                texts['input_ids'] = texts['input_ids'].squeeze(1).cuda(args.gpu, non_blocking=True)
+                texts['attention_mask'] = texts['attention_mask'].squeeze(1).cuda(args.gpu, non_blocking=True)
 
-            im_features, t_features, logit_scale = model(ims, texts)
-            all_im_features.append(im_features)
-            all_t_features.append(t_features)
-            logit_scale = logit_scale.mean()
-            im_logits = logit_scale * im_features @ t_features.t()
-            t_logits = im_logits.t()
+            inputs = {'input_ids': texts['input_ids'], 'attention_mask': texts['attention_mask'], 'pixel_values': ims}
+
+            outputs = model(**inputs)
+            all_im_features.append(outputs['image_embeds'])
+            all_t_features.append(outputs['text_embeds'])
+            im_logits = outputs['logits_per_image'].mean() * outputs['image_embeds'] @ outputs['text_embeds'].t()
+            t_logits = outputs['logits_per_text'].mean() * outputs['text_embeds'] @ outputs['image_embeds'].t()
 
             gt = torch.arange(len(ims)).long()
             if args.gpu is not None:
