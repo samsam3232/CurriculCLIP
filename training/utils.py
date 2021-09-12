@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-import torch.nn as nn
 
 
 def get_predictions_metrics(t_features, im_features):
@@ -22,11 +21,12 @@ def get_predictions_metrics(t_features, im_features):
     return results
 
 
-def get_loss(model, inputs, loss_img, loss_txt, args):
+def get_loss(model, images, texts, loss_img, loss_txt, args):
 
-    outputs = model(**inputs)
-    im_logits = outputs['logits_per_image'].mean() * outputs['image_embeds'] @ outputs['text_embeds'].t()
-    t_logits = outputs['logits_per_text'].mean() * outputs['text_embeds'] @ outputs['image_embeds'].t()
+    image_features, text_features, logit_scale = model(images, texts)
+    logit_scale = logit_scale.mean()
+    im_logits = logit_scale * image_features @ text_features.t()
+    t_logits = logit_scale * text_features @ image_features.t()
 
     ground_truth = torch.arange(len(im_logits)).long()
     if args.gpu is not None:

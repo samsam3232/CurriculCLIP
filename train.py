@@ -1,18 +1,15 @@
 import torch
 import logging
-import wandb
 import os
 import json
-from torch.cuda.amp import autocast
 import time
 from training.zero_shot_imagenet_util import zero_shot_evaluation
 from training.utils import get_predictions_metrics, get_loss
 import torch.nn as nn
-import numpy as np
 
 
 
-def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None):
+def train(model, data, epoch, optimizer, args):
     os.environ["WDS_EPOCH"] = str(epoch)
 
     model.train()
@@ -29,35 +26,18 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
 
     end = time.time()
     for i, batch in enumerate(loader):
-        step = num_batches_per_epoch * epoch + i
-        scheduler(step)
         optimizer.zero_grad()
-
         images, texts = batch
         if args.gpu is not None:
             images = images.cuda(args.gpu, non_blocking=True)
-            texts['input_ids'] = texts['input_ids'].squeeze(1).cuda(args.gpu, non_blocking=True)
-            texts['attention_mask'] = texts['attention_mask'].squeeze(1).cuda(args.gpu, non_blocking=True)
+            texts = texts.cuda(args.gpu, non_blocking=True)
 
-        inputs = {'input_ids': texts['input_ids'], 'attention_mask': texts['attention_mask'], 'pixel_values': images}
         data_time = time.time() - end
 
-#        m = model.module
+        total_loss = get_loss(model, images, texts, loss_img, loss_txt, args)
+        total_loss.backward()
+        optimizer.step()
 
-        # with automatic mixed precision.
-        if args.precision == "amp":
-            with autocast():
-                total_loss = get_loss(model, images, texts, loss_img, loss_txt, args)
-                scaler.scale(total_loss).backward()
-                scaler.step(optimizer)
-            scaler.update()
-
-        else:
-            total_loss = get_loss(model, inputs, loss_img, loss_txt, args)
-            total_loss.backward()
-            optimizer.step()
-
-#        m.logit_scale.data = torch.clamp(m.logit_scale.data, 0, 4.6052)
         batch_time = time.time() - end
         end = time.time()
 
@@ -70,30 +50,13 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
                 f"Loss: {total_loss.item():.6f}\tData (t) {data_time:.3f}\tBatch (t) {batch_time:.3f}"
                 f"\tLR: {optimizer.param_groups[0]['lr']:5f}"
             )
-            # save train loss / etc.
 
-            timestep = epoch * num_batches_per_epoch + i
-            log_data = {
-                "loss": total_loss.item(),
-                "data_time": data_time,
-                "batch_time": batch_time,
-#                "scale": m.logit_scale.data.item(),
-                "lr": optimizer.param_groups[0]["lr"]
-            }
-
-            for name, val in log_data.items():
-                name = "train/" + name
-                if tb_writer is not None:
-                    tb_writer.add_scalar(name, val, timestep)
-                if args.wandb:
-                    wandb.log({name: val, 'step': timestep})
-
-        if (i % 250) == 249:
+        if (i % 2000) == 1999:
             logging.info(f'Epoch {epoch}, step {i} evaluation:')
-            evaluate(model, data, epoch, args, tb_writer)
+            evaluate(model, data, epoch, args)
 
 
-def evaluate(model, data, epoch, args, tb_writer=None):
+def evaluate(model, data, epoch, args):
 
     model.eval()
     if epoch % args.zeroshot_frequency == 0:
@@ -115,17 +78,14 @@ def evaluate(model, data, epoch, args, tb_writer=None):
     with torch.no_grad():
         for ims, texts in loader:
             if args.gpu is not None:
-                ims = ims.cuda(args.gpu, non_blocking=True)
-                texts['input_ids'] = texts['input_ids'].squeeze(1).cuda(args.gpu, non_blocking=True)
-                texts['attention_mask'] = texts['attention_mask'].squeeze(1).cuda(args.gpu, non_blocking=True)
+                ims, texts = ims.cuda(args.gpu, non_blocking=True), texts.cuda(args.gpu, non_blocking=True)
 
-            inputs = {'input_ids': texts['input_ids'], 'attention_mask': texts['attention_mask'], 'pixel_values': ims}
-
-            outputs = model(**inputs)
-            all_im_features.append(outputs['image_embeds'])
-            all_t_features.append(outputs['text_embeds'])
-            im_logits = outputs['logits_per_image'].mean() * outputs['image_embeds'] @ outputs['text_embeds'].t()
-            t_logits = outputs['logits_per_text'].mean() * outputs['text_embeds'] @ outputs['image_embeds'].t()
+            im_features, t_features, logit_scale = model(ims, texts)
+            all_im_features.append(im_features)
+            all_t_features.append(t_features)
+            logit_scale = logit_scale.mean()
+            im_logits = logit_scale * im_features @ t_features.t()
+            t_logits = im_logits.t()
 
             gt = torch.arange(len(ims)).long()
             if args.gpu is not None:
@@ -141,14 +101,6 @@ def evaluate(model, data, epoch, args, tb_writer=None):
         metrics.update({"loss:": (total_loss / samples_num).item(), "epoch": epoch, "samples num": samples_num})
 
         logging.info(f"Eval Epoch: {epoch} " + "\t".join([f"{k}: {v:.4f}" for k, v in metrics.items()]))
-
-        if args.save_logs:
-            for name, val in metrics.items():
-                if tb_writer is not None:
-                    tb_writer.add_scalar(f"val/{name}", val, epoch)
-        if args.wandb:
-            for name, val in metrics.items():
-                wandb.log({f"val/{name}": val, 'epoch': epoch})
 
     if args.save_logs:
         with open(os.path.join(args.checkpoint_path, "results.jsonl"), "a+") as f:

@@ -1,9 +1,6 @@
 import logging
 from logging import Filter
 from logging.handlers import QueueHandler, QueueListener
-
-import torch
-import torch.distributed as dist
 from torch.multiprocessing import Queue
 
 
@@ -53,17 +50,3 @@ def setup_worker_logging(rank, log_queue, level):
     root_logger.addHandler(queue_handler)
 
     root_logger.setLevel(level)
-
-
-def fake_worker(rank: int, world_size: int, log_queue: Queue):
-    setup_worker_logging(rank, log_queue, logging.DEBUG)
-    logging.info("Test worker log")
-    logging.error("Test worker error log")
-    torch.cuda.set_device(rank)
-    dist.init_process_group(
-        backend='nccl',
-        init_method='tcp://127.0.0.1:6100',
-        world_size=world_size,
-        rank=rank,
-    )
-

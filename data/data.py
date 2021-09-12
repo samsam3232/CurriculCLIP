@@ -1,6 +1,7 @@
 import logging
 import os.path
 
+import numpy as np
 import pandas as pd
 from PIL import Image
 import torch
@@ -16,30 +17,51 @@ class ConceptualCaption(Dataset):
         logging.debug(f'Loading csv data from {input_filename}.')
 
         df = pd.read_csv(input_filename, sep='\t')
-
+        df = df.iloc[:500000]
         if sorted:
             df = self.sort_csv(df)
 
         self.ims_root = ims_root
-        self.images = df['filepath'].tolist()
-        self.captions = df['title'].tolist()
+        self.images = np.array(df['filepath'].tolist())
+        self.captions = np.array(df['title'].tolist())
+        self.captionlengths = np.array(df['captionlength'].tolist())
         self.transforms = transforms
+        self.sorted = sorted
         logging.debug('Done loading data.')
 
     def sort_csv(self, df):
-        df['word_count'] = df['title'].str.replace(' \.', '.').str.split(' ').str.len()
-        df = df.sort_values('word_count', ascending=True)
+        df = df.sort_values('captionlength', ascending=True)
         return df
+
+
+    def reshuffle(self):
+
+        unique_vals = np.unique(self.captionlengths)
+        permutations = None
+        for val in unique_vals:
+            curr_permutations = np.random.permutation(np.where(self.captionlengths == val)[0])
+            if permutations is None:
+                permutations = curr_permutations
+            else:
+                permutations = np.concatenate((permutations, curr_permutations))
+
+        self.captions = self.captions[permutations]
+        self.images = self.images[permutations]
+        self.captionlengths = self.captionlengths[permutations]
+
 
     def __len__(self):
         return min(500000, len(self.captions))
 
     def __getitem__(self, idx):
+        if idx == 0 and self.sorted:
+            self.reshuffle()
+            logging.info('Reshuffled data.')
         not_found = True
         while not_found:
             try:
                 images = self.transforms(Image.open(os.path.join(self.ims_root, str(self.images[idx]))))
-                texts = preprocess_txt([str(self.captions[idx])])
+                texts = tokenize([str(self.captions[idx])])[0]
                 not_found = False
             except:
                 idx += 1
@@ -47,7 +69,7 @@ class ConceptualCaption(Dataset):
 
 
 def preprocess_txt(text):
-    return PROCESSOR.tokenizer(text, return_tensors='pt', padding='max_length',  max_length=60)
+    return tokenize([str(text)])[0]
 
 
 def get_imagenet_loader(args, preprocess_fns):
@@ -76,7 +98,7 @@ def get_cc_loader(args, preprocess_fn, is_train):
     dataloader.num_samples = num_samples
     dataloader.num_batches = len(dataloader)
 
-    return dataloader
+    return dataloader, dataset
 
 
 def get_data(args, preprocess_fns):
@@ -84,9 +106,10 @@ def get_data(args, preprocess_fns):
     data = {}
 
     if args.train_data:
-        data["train"] = get_cc_loader(args, preprocess_train, is_train=True)
+        data["train"], dataset = get_cc_loader(args, preprocess_train, is_train=True)
+        data["trainset"] = dataset
     if args.val_data:
-        data["val"] = get_cc_loader(args, preprocess_val, is_train=False)
+        data["val"], _ = get_cc_loader(args, preprocess_val, is_train=False)
 
     if args.imagenet_val is not None:
         data["imagenet-val"] = get_imagenet_loader(args, preprocess_fns)
